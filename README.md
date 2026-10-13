@@ -1,10 +1,62 @@
 # sh-tx-proxy
 
+> **本项目已弃用，改用同目录的 `set-proxy.sh`。** 本仓库的路线是「source 一个 shell 脚本 + 手动 `p-sh`/`p-tx` 切换」，
+> 代价是只覆盖 source 过它的 shell，bash / 登录 / 非交互会话都得另挂入口，越补越复杂。
+> `set-proxy.sh` 反过来：一条命令把代理**写死进每个工具自己的配置文件**（`~/.bashrc`、`~/.zshrc`、`~/.profile`、
+> `~/.gitconfig`、`~/.npmrc`、`~/.curlrc`、`~/.wgetrc`、`pip.conf`），之后不再依赖任何 source 或命令切换。
+> 用法见下面「[set-proxy.sh：一条命令写死到各工具配置](#set-proxysh一条命令写死到各工具配置)」。
+
 在终端里手动切换 HTTP 代理的小脚本，**git 和 npm 跟着一起切**，不用再改第二处。
 
 `proxy.sh` 提供五个命令：`p-sh` 切到上海代理，`p-tx` 切到 TX 代理，`poff` 关闭代理，`pst` 查看当前代理状态（含 git / npm 的生效值），`ptest` 探测两个代理地址哪个可达（两地办公用）。
 
 脚本被 source 时**还会按本机网段自动选好一个代理**（`PROXY_DEFAULT=auto`，默认开着），新开终端不用手敲 `p-sh` / `p-tx`。
+
+## `set-proxy.sh`：一条命令写死到各工具配置
+
+```bash
+bash set-proxy.sh tx            # 10.100.36.162:7890（TX）
+bash set-proxy.sh sh            # 10.10.2.14:7890（上海）
+bash set-proxy.sh http://x.y:1234   # 自定义
+bash set-proxy.sh show          # 打印 8 处当前值 + 端到端自检
+bash set-proxy.sh off           # 全部撤销（rc 块删除后逐字节还原，实测）
+bash set-proxy.sh tx --apt      # 顺带写 /etc/apt/apt.conf.d/95proxy（需 root）
+bash set-proxy.sh tx --goproxy  # Go 模块换 https://goproxy.cn,direct（不用翻墙）
+bash set-proxy.sh tx --sweep    # 顺带删掉 rc 里残留的 source ~/.sh-tx-proxy/proxy.sh
+```
+
+写到的位置（每一处都实测验证过"清光环境变量、只靠配置文件"能出网）：
+
+| 工具 | 落到哪 | 实测 |
+| --- | --- | --- |
+| shell（bash/zsh/登录 shell） | `~/.bashrc`、`~/.zshrc`、`~/.profile` 的标记块，大小写六套 `*_proxy` + `no_proxy` | 新开 bash/zsh → `http://10.100.36.162:7890` |
+| git | `~/.gitconfig` 的 `http.proxy` / `https.proxy` | 清环境变量 `git ls-remote github` ✅ 返回 SHA |
+| npm | `~/.npmrc` 的 `proxy` / `https-proxy` / `noproxy`（npm **不读** `http_proxy`） | `npm ping` → PONG 1180ms |
+| curl | `~/.curlrc` 的 `proxy` / `noproxy` | google 200 / 0.6s |
+| wget | `~/.wgetrc` 的 `use_proxy` + `http_proxy` | github 200 |
+| pip | `~/.config/pip/pip.conf` 的 `global.proxy` / `global.noproxy` | `pip download requests` 成功 |
+| apt | `/etc/apt/apt.conf.d/95proxy`（仅 `--apt`） | — |
+| Go | `go env -w GOPROXY`（仅 `--goproxy`） | — |
+
+特性：只动 `# ---- proxy (managed by set-proxy.sh) ----` 到 `# ---- proxy end ----` 之间的内容，**重复执行不堆叠**（实测块数恒为 1）；首次改动留 `<文件>.bak-set-proxy`；`off` 后 `.bashrc/.zshrc/.profile` 与原始**逐字节一致**；`HOME` 为空或不可写直接拒绝执行（不会误写 `/.bashrc`）。
+
+盖不住的场合（不是脚本的问题，是这些进程根本不读 rc 文件）：`cron`（默认 `/bin/sh`）、`systemd` unit、`bash -c` 这类非交互 shell、`sudo` 之后的环境。要覆盖它们：在 unit / crontab 里显式 `export https_proxy=...`，或写 `/etc/environment`（PAM 会话，含 cron，需重新登录生效）。
+
+撤销本项目 + 换用 `set-proxy.sh` 的完整三步（自己粘，先跑 `bash set-proxy.sh show` 确认）：
+
+```bash
+# 1. 先把脚本搬出去，再删仓库和软链，否则 set-proxy.sh 自己也没了
+mkdir -p /root/bin && cp /opt/github/sh-tx-proxy/set-proxy.sh /root/bin/ && chmod 755 /root/bin/set-proxy.sh
+bash /root/bin/set-proxy.sh tx --sweep
+
+# 2. 弃用 sh-tx-proxy
+rm -f /root/.sh-tx-proxy                      # 软链
+rm -rf /opt/github/sh-tx-proxy                # 仓库本体
+
+# 3. 收尾检查（应只看到静态值，没有 proxy.sh 引用）
+bash /root/bin/set-proxy.sh show
+git config --list --show-origin | grep -i proxy
+```
 
 ## 代理地址
 
