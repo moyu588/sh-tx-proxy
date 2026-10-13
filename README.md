@@ -62,7 +62,7 @@ git config --global --unset https.proxy
 
 **为什么用软链而不是直接 clone 到 `~/.sh-tx-proxy`**：机器上只有一份仓库，GitHub 上更新后 `cd /opt/github/sh-tx-proxy && git pull`，`~/.sh-tx-proxy` 透过软链自动同步，不存在两处副本各自漂移；启动文件里 source 的路径也永远是 `~/.sh-tx-proxy/proxy.sh`，换机器写法一致。
 
-上面三步是「手动、可回滚、看得见」的装法，适合第一次认识这套脚本。嫌每次开终端要确认一遍、想把各型会话都挂上的，用 `install-hooks.sh`（见「彻底免手动」一节）：它只做追加带标记的行 + 备份 + 幂等，且可以 `--uninstall` 逐字节还原。
+上面三步是「手动、可回滚、看得见」的装法。装完之后交互 zsh / 交互 bash 开终端即带代理（`proxy.sh` 会按网段自动选，见「开终端就带代理」一节），不需要任何日常操作。嫌脚本这层还绕、就想看得见摸得着的，直接抄「不想用命令切换：启动文件里写死静态 `export`」那一节。
 
 以前已经 clone 到 `~/.sh-tx-proxy` 的老机器，改成软链（先确认没有本地未提交改动）：
 
@@ -180,7 +180,7 @@ localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12
 | 作用域 | 只影响当前 shell 及其子进程。source 时自动选路会把代理设上（写进启动文件即每个新终端自动带代理）。不同终端可以走不同代理，互不干扰。 |
 | 自动选路的影响面 | 网段判断只对 `10.10.*` / `10.100.*` 生效，认不出来就当直连，不会瞎设一个不可用的代理。副作用是：**这台机器上所有 source 过启动文件的 shell 默认都出网走代理**，内网靠 `no_proxy` 直连；不想带代理的会话用 `PROXY_DEFAULT=off` 起，或进去再 `poff`。 |
 | 不落盘 | 不写 `~/.gitconfig`、不写 `~/.npmrc`，所以不存在“一个终端 `poff` 把别的会话弄坏”的问题。 |
-| 唯一的破坏性步骤 | 安装第 3 步删掉 `~/.gitconfig` 里写死的 `http.proxy`。之后凡是**没有 source 过启动文件**的场合（cron、systemd unit、`docker exec`、`bash -c` 这类非交互 shell、某些 CI runner、agent 会话）git 会变成直连——注意不是“退回直连就通了”，而是**直连等超时**：实测同一台机器不带代理 `git ls-remote` 卡到 12s 超时（`timeout 12` 退出码 124），带代理 0.7s 返回。如果那个场合必须走代理，三种处理：任务里显式 `export https_proxy=...`；`source ~/.sh-tx-proxy/proxy.sh`（非交互 bash 得先按安装第 2 步把 source 行写进 `~/.bashrc`，且 `BASH_ENV` 指过去才会自动跑）；或只给那个仓库配代理 `git -C /path/repo config http.proxy http://10.100.36.162:7890`（写进 `.git/config`，不影响其他 shell 的切换）。 |
+| 唯一的破坏性步骤 | 安装第 3 步删掉 `~/.gitconfig` 里写死的 `http.proxy`。之后凡是**没有 source 过启动文件**的场合（cron、systemd unit、`docker exec`、`bash -c` 这类非交互 shell、某些 CI runner、agent 会话）git 会变成直连——注意不是“退回直连就通了”，而是**直连等超时**：实测同一台机器不带代理 `git ls-remote` 卡到 12s 超时（`timeout 12` 退出码 124），带代理 0.7s 返回。如果那个场合必须走代理，两种处理：任务里显式 `export https_proxy=...`（或 `. ~/.sh-tx-proxy/proxy.sh`）；或只给那个仓库配代理 `git -C /path/repo config http.proxy http://10.100.36.162:7890`（写进 `.git/config`，不影响其他 shell 的切换）。 |
 | 回滚 | `git config --global http.proxy http://10.10.2.14:7890` 一行恢复原样；删掉 `~/.bashrc` / `~/.zshrc` 里的 source 行即可完全退出这套脚本；只想停自动选路就 `export PROXY_DEFAULT=off`。 |
 | npm 副作用 | `npm_config_proxy` / `npm_config_https_proxy` / `npm_config_noproxy` 会被同 shell 里所有走 npm 配置约定的程序（npm、npx、node-gyp 等）读取，仅当前 shell 有效。不想带代理跑 npm 就 `poff` 或另开终端；但如果 `~/.npmrc` 里写过 `proxy=`，`poff` 之后 npm 会退回那个值（见安装一节的 `npm config delete`）。 |
 | 工具兼容性 | `10.0.0.0/8` 这类 CIDR 写法，curl、git、Go 程序能识别；Python `requests` 等只做后缀匹配的工具看不懂，可能需要改成逐个 IP 或域名后缀。npm 的 `noproxy` 同样按 npm 自己的匹配规则处理，遇到内网 registry 走了代理就往这一项排查。 |
@@ -200,45 +200,42 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://github.com   # 4. 端到端
 - `pst` 显示有代理但 `curl` 卡住：`ptest` 跑一下，多半是代理端（clash 没起、没开 allow-lan、主机防火墙入站被策略挡）。特征是 **SYN 无回音（`filtered`）而不是 `closed`**——`closed` 说明包已经进到 TCP 栈、只是没人监听；`filtered` 说明包根本没进去，加在本地防火墙的放行规则未必生效（域策略 `AllowInboundRules=False`、或杀软接管过滤时就是这种）。
 - 只有国内站通、google/github 干等超时：代理没在工作，本机本身没有翻墙出口，不要误判成“直连能用”。
 
-## 彻底免手动：`install-hooks.sh`
+## 不想用命令切换：启动文件里写死静态 `export`
 
-自动选路只对**source 过脚本的 shell** 生效。这台机器上 `~/.zshrc` 已经有了，所以交互 zsh 终端（你日常用的那种）**开终端即带代理，不需要任何操作**。其它会话类型各有各的入口，用仓库里的 `install-hooks.sh` 一次挂全：
+最省事的路线：不碰这套脚本的命令，直接把代理写进 shell 启动文件，开终端就有，和用不用本仓库无关。
 
 ```bash
-cd /opt/github/sh-tx-proxy
-bash install-hooks.sh            # 只挂当前用户：~/.bashrc、~/.zshrc（交互终端够用）
-sudo bash install-hooks.sh --all # 再挂系统级：/etc/profile.d、/etc/zsh/zshenv、/etc/environment
-bash install-hooks.sh --check    # 打印覆盖矩阵，不改任何文件
-sudo bash install-hooks.sh --uninstall   # 撤销它加的行（按标记删，卸载后 rc 文件逐字节还原）
+# ~/.zshrc 和 ~/.bashrc 各贴一份（TX 端；上海端换成 http://10.10.2.14:7890）
+export http_proxy=http://10.100.36.162:7890
+export https_proxy=$http_proxy
+export all_proxy=$http_proxy
+export no_proxy=localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12
+export npm_config_proxy=$http_proxy npm_config_https_proxy=$http_proxy npm_config_noproxy=$no_proxy
 ```
 
-它往每处写的都是同一句 `source .../proxy.sh`，加一行标记注释，**幂等**（重复跑显示「已挂过」），改前留 `*.bak-sh-tx-proxy` 备份。
+三个必须知道的点：
 
-挂载点与覆盖面（实测矩阵）：
+1. **`~/.zshrc` 里原有的注释行是上海地址**（`10.10.2.14:7890`），人在 TX 时直接取消注释就废了 —— 地址必须按当前办公地点核对，别照抄。
+2. **npm 不读 `http_proxy`**，所以 `npm_config_*` 那两行不能省（实测：`http_proxy=http://1.2.3.4:7890 npm config get proxy` → `null`）。curl / wget / git / Go / pip 只靠前四行就跟着走。
+3. **git 里不能再写死 `http.proxy`**，它优先级高于环境变量，写死之后静态 `export` 对 git 无效：
+   ```bash
+   git config --list --show-origin | grep -i proxy   # 输出必须为空
+   ```
 
-| 会话类型 | 靠哪一处 | 说明 |
+写了静态 `export`，`proxy.sh` 的自动选路会让位（环境里已有代理就不动，`pst` 标 `来源 继承自环境`），但 `p-sh` / `p-tx` / `pst` / `ptest` 仍然可用：临时切另一头就敲一下命令，**同一个 shell 里命令优先，重开终端又回到静态值**。两者并存不冲突，静态是默认值，命令是临时改道。
+
+静态路线盖不住的场景（要覆盖就得回到“多入口钩子”那套，或单独处理）：
+
+| 场景 | 结果 | 单独处理 |
 | --- | --- | --- |
-| 交互 zsh（终端 tab） | `~/.zshrc` | ✅ 本来就有，装完仍是它 |
-| 交互 bash | `~/.bashrc` | Kali 的 `/etc/bash.bashrc` 第 7 行 `[ -z "$PS1" ] && return` 会挡非交互，所以只能挂用户级 |
-| 登录 shell（`bash -l`、`su -`） | `/etc/profile.d/99-sh-tx-proxy.sh` | 会被 `sh`/`dash` 读，所以 `proxy.sh` 必须保持 POSIX 兼容（已处理，见下） |
-| 非交互 zsh（`zsh -c`、zsh 脚本） | `/etc/zsh/zshenv` | zshenv 对**每一次** zsh 调用都生效 |
-| 非交互 bash（`bash -c`、agent、脚本） | `/etc/environment` 里的 `BASH_ENV` | 由 `pam_env` 应用，**新登录会话之后**才起效；实测：静默、`set -euo pipefail` 无碍、路径不存在时 bash 直接忽略、每个 `bash -c` 多 8ms |
+| 交互 zsh / 交互 bash | ✅ 有代理 | — |
+| `bash -l` 登录 shell | 看 `~/.profile`，bash 交互只读 `~/.bashrc` | 同一份 export 也写进 `~/.profile` |
+| `bash -c`、脚本、agent 会话 | ❌ 没有（非交互不读 rc 文件） | 任务里显式 `export https_proxy=...` |
+| cron | ❌ 默认 `/bin/sh` | crontab 顶部 `SHELL=/bin/bash` + 显式 export |
+| sudo | ❌ 被清掉 | `Defaults env_keep += "http_proxy https_proxy no_proxy"` |
+| systemd unit | ❌ 不读 shell 配置 | unit 里 `Environment="https_proxy=http://10.100.36.162:7890"` |
 
-几个已知的口子（脚本装完也会提醒你这三行）：
-
-- **cron**：Debian 的 cron 默认 `SHELL=/bin/sh`（dash），**不吃 `BASH_ENV`**。要么 crontab 里写 `SHELL=/bin/bash`，要么任务里显式 `. /root/.sh-tx-proxy/proxy.sh`。cron 走 `pam_env`，所以 `/etc/environment` 里再加一份静态 `https_proxy=...` 也能覆盖。
-- **sudo**：会清掉 `BASH_ENV` 和代理变量，需要就 `Defaults env_keep += "BASH_ENV http_proxy https_proxy no_proxy"`。
-- **systemd unit**：不读上面任何一处，`artex.service` 这类服务要自己 `Environment="https_proxy=http://10.100.36.162:7890"` 或 `EnvironmentFile=`。
-
-装完之后 `bash install-hooks.sh --check` 会打出这样一张表，用来日常核对：
-
-```
-  zsh-交互       http://10.100.36.162:7890
-  zsh-非交互     http://10.100.36.162:7890
-  bash-交互      http://10.100.36.162:7890
-  bash-登录      http://10.100.36.162:7890
-  bash-非交互    http://10.100.36.162:7890
-```
+> 本机（`kalitest` / 10.100.1.122，TX 段）当前状态：交互 zsh 由 `~/.zshrc` 里 `source proxy.sh` + 自动选路带代理；`~/.bashrc` 未挂任何东西。曾试过把 `source` 挂到 `/etc/profile.d`、`/etc/zsh/zshenv`、`/etc/environment(BASH_ENV)` 做全会话覆盖，评估后觉得没必要，回退为上面这种静态写法，只改自己两个 rc 文件。
 
 ## 扩展
 
