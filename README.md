@@ -18,11 +18,8 @@
 不建议再写 install.sh：改的是 shell 启动文件 + git 全局配置，脚本自动化踩到别人机器的概率比收益大。三步都是可回滚的手工命令：
 
 ```bash
-# 1. 拿到脚本（二选一）
-#    a) 普通机器：clone 一份到 home
-git clone https://github.com/moyu588/sh-tx-proxy.git ~/.sh-tx-proxy
-#    b) 这台机器：仓库已经在 /opt/github/sh-tx-proxy，直接软链，不用 clone，
-#       以后在 /opt/github/sh-tx-proxy 里 git pull，home 下的副本自动跟着更新
+# 1. 仓库固定在 /opt/github/sh-tx-proxy，再软链一份到 ~/.sh-tx-proxy
+git clone https://github.com/moyu588/sh-tx-proxy.git /opt/github/sh-tx-proxy
 ln -s /opt/github/sh-tx-proxy ~/.sh-tx-proxy
 
 # 2. 让 shell 启动时加载（bash 和 zsh 各写一行，用哪个 shell 就写哪个）
@@ -34,7 +31,17 @@ git config --global --unset http.proxy
 git config --global --unset https.proxy
 ```
 
-已经装过旧版本的服务器，只需要 `cd ~/.sh-tx-proxy && git pull` 补上第 3 步；命令名没变（`p-sh` / `p-tx` / `poff` / `pst`），实现从 alias 换成了函数。软链方式的机器，更新在源仓库目录里做：`cd /opt/github/sh-tx-proxy && git pull`。
+**为什么用软链而不是直接 clone 到 `~/.sh-tx-proxy`**：机器上只有一份仓库，GitHub 上更新后 `cd /opt/github/sh-tx-proxy && git pull`，`~/.sh-tx-proxy` 透过软链自动同步，不存在两处副本各自漂移；启动文件里 source 的路径也永远是 `~/.sh-tx-proxy/proxy.sh`，换机器写法一致。
+
+以前已经 clone 到 `~/.sh-tx-proxy` 的老机器，改成软链（先确认没有本地未提交改动）：
+
+```bash
+git -C ~/.sh-tx-proxy status --short          # 应为空，非空先 commit 或 stash
+mv ~/.sh-tx-proxy /opt/github/sh-tx-proxy     # /opt/github 不存在时先 mkdir -p
+ln -s /opt/github/sh-tx-proxy ~/.sh-tx-proxy
+```
+
+装过旧版本、只是想更新命令的机器：`cd /opt/github/sh-tx-proxy && git pull` 再补第 3 步即可；命令名没变（`p-sh` / `p-tx` / `poff` / `pst`），实现从 alias 换成了函数。
 
 第 3 步前先确认还有没有别的写死位置：
 
@@ -51,6 +58,34 @@ npm config delete proxy; npm config delete https-proxy; npm config delete noprox
 ```
 
 （`~/.npmrc` 里没有这几项的机器，上面三条会报 config key not found，忽略即可。）
+
+## 推送凭据（只有要往 GitHub push 的机器需要）
+
+仓库是 public，匿名 `git pull` / `git clone` 就能读，**只有写（push）才需要凭据**。远端 URL 保持 HTTPS，配 `~/.git-credentials`：
+
+```bash
+git config --global credential.helper store
+echo 'https://moyu588:<Fine-grained PAT>@github.com' >> ~/.git-credentials
+chmod 600 ~/.git-credentials
+```
+
+Token 在 GitHub → Settings → Developer settings → Fine-grained tokens 里建：Repository access 只勾 `moyu588/sh-tx-proxy`，Permissions → Contents 给 Read and write，务必设到期时间。
+
+验证（`ls-remote` 匿名就能过，测不出写权限，要用 dry-run）：
+
+```bash
+cd /opt/github/sh-tx-proxy && git push --dry-run origin main
+```
+
+`~/.git-credentials` 是**明文文件**，`chmod 600` 只是最低限度防护：共享机、备份、镜像都会把 token 带出去。不想留明文就改用 `git config --global credential.helper 'cache --timeout=36000'`（内存缓存 10 小时，不落盘），代价是重启后要重新输一次。
+
+日常同步：
+
+```bash
+cd /opt/github/sh-tx-proxy
+git pull --rebase        # 拉 GitHub 上的更新，软链让 ~/.sh-tx-proxy 自动同步
+git push origin main     # 本地改了 proxy.sh / README 之后推回去
+```
 
 ## git 和 npm 为什么能跟着变
 
