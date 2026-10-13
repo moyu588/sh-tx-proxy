@@ -19,8 +19,10 @@ PROXY_DEFAULT="${PROXY_DEFAULT:-auto}"
 # 自动设上时不打字（每开一个终端都刷一行太吵），想看过程就 PROXY_DEFAULT_VERBOSE=1
 PROXY_DEFAULT_VERBOSE="${PROXY_DEFAULT_VERBOSE:-0}"
 
-# 只用于 pst 显示来源，不导出
-PROXY_APPLIED_BY=""
+# 只用于 pst 显示来源，不导出。故意不在这里清空：
+# 同一 shell 里第二次 source（zshenv + ~/.zshrc 双挂、或者手抖 reload 一次）时，
+# 自动选路会被 PROXY_LOADED 跳过，来源得留着，否则 pst 会显得“不知道代理哪来的”。
+: "${PROXY_APPLIED_BY:=}"
 
 # 导出两套约定：
 #   http_proxy/https_proxy/all_proxy/no_proxy —— curl、wget、git、Go、pip 等认这套
@@ -140,9 +142,16 @@ proxy_status() {
     env | grep -iE '^(http|https|all|no)_proxy=' | sed 's/^/  env  /' | sort
 
     # 自动选路的判定结果单独打一行，方便排查「为什么这台开了终端没代理」
-    local _pick _ip
+    local _pick _ip _note
     _ip=$(_proxy_local_ip); _pick=$(_proxy_pick)
-    echo "  自动  本机 $_ip / PROXY_DEFAULT=${PROXY_DEFAULT:-未设置} → $( [ -n "$_pick" ] && echo "$_pick（$( [ "$_pick" = sh ] && echo "$PROXY_SH" || echo "$PROXY_TX" )）" || echo "不自动设" )"
+    if [ "$PROXY_APPLIED_BY" = "poff 手动关闭" ]; then
+        _note="本 shell 已 poff，PROXY_LOADED 生效不再自动重设"
+    elif [ -z "$_pick" ]; then
+        _note="不自动设"
+    else
+        _note="$( [ "$_pick" = sh ] && echo "$PROXY_SH" || echo "$PROXY_TX" )"
+    fi
+    echo "  自动  本机 $_ip / PROXY_DEFAULT=${PROXY_DEFAULT:-未设置} → $_note"
 
     if command -v npm >/dev/null 2>&1; then
         local _np
@@ -187,7 +196,12 @@ proxy_test() {
 # 加载即生效：新开终端不用再手敲 p-sh / p-tx（PROXY_DEFAULT=off 可关掉）
 # 必须放在带连字符的命令名之前：dash/sh 解析到 `p-sh()` 会 Bad function name 直接中断，
 # 自动选路写在后面的话 POSIX shell 里就永远跑不到。
-_proxy_autoset
+# PROXY_LOADED 不导出，所以只有「同一个 shell 里被 source 第二次」（比如 /etc/zsh/zshenv +
+# ~/.zshrc 各挂了一次）会被跳过，避免把 pst 的「来源」刷成 继承自环境。
+if [ -z "${PROXY_LOADED:-}" ]; then
+    PROXY_LOADED=1
+    _proxy_autoset
+fi
 
 poff()  { proxy_off; }
 pst()   { proxy_status; }

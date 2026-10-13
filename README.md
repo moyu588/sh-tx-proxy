@@ -29,7 +29,8 @@ source 脚本时会自动执行一次选路，所以**新终端不用再手敲 `
 
 - **环境里已经有代理就一律不动**（父 shell 继承来的、脚本里显式 `export` 的、`PROXY_DEFAULT` 之外手动设的都算），`pst` 会标成 `来源 继承自环境`。
 - 自动设时**不打印任何东西**，免得每开一个终端刷一行；要看就 `PROXY_DEFAULT_VERBOSE=1`，`pst` 里也永远有一行 `自动 本机 10.100.1.122 / PROXY_DEFAULT=auto → tx（…）`。
-- `poff` 只关当前 shell。**同一个 shell 里再 source 一次（或 reload zshrc）会被自动选路重新设上** —— 想在某个 shell 里待着不设代理：`export PROXY_DEFAULT=off` 再 source。
+- `poff` 只关当前 shell。**同一个 shell 里再 source 一次（reload zshrc、zshenv 与 `~/.zshrc` 双挂）不会被重新设上** —— 靠 `PROXY_LOADED` 标记跳过，`pst` 的「来源」也保持原值不会被刷成 `继承自环境`。想开回来直接敲 `p-tx` / `p-sh`。
+- 反过来，**下一个新终端还是会自动带上**（这是“免手动”的目的）。想让某个 shell 从头到尾不带代理：`export PROXY_DEFAULT=off` 之后再开 shell / source。
 - 开销：一次 `hostname -I`（失败才退到 `ip` / `ifconfig`），实测 source 一遍约 8ms。
 
 写法（在启动文件里 source 之前 export，就这台机器生效）：
@@ -60,6 +61,8 @@ git config --global --unset https.proxy
 第 2 步 **bash 那行很容易漏**：只写 `~/.zshrc` 的话，交互 zsh 一切正常，但 `bash`、`sh`、`sudo -i`、以及任何非交互 shell 里连 `p-sh` 函数都没有，脚本导出的自动选路也不会跑（自动选路只在 source 发生时执行）。
 
 **为什么用软链而不是直接 clone 到 `~/.sh-tx-proxy`**：机器上只有一份仓库，GitHub 上更新后 `cd /opt/github/sh-tx-proxy && git pull`，`~/.sh-tx-proxy` 透过软链自动同步，不存在两处副本各自漂移；启动文件里 source 的路径也永远是 `~/.sh-tx-proxy/proxy.sh`，换机器写法一致。
+
+上面三步是「手动、可回滚、看得见」的装法，适合第一次认识这套脚本。嫌每次开终端要确认一遍、想把各型会话都挂上的，用 `install-hooks.sh`（见「彻底免手动」一节）：它只做追加带标记的行 + 备份 + 幂等，且可以 `--uninstall` 逐字节还原。
 
 以前已经 clone 到 `~/.sh-tx-proxy` 的老机器，改成软链（先确认没有本地未提交改动）：
 
@@ -196,6 +199,46 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://github.com   # 4. 端到端
 - `pst` 显示 `未设置代理` + `自动 … → 不自动设`：`PROXY_DEFAULT` 被设成 `off`／本机 IP 认不出来／没 source。
 - `pst` 显示有代理但 `curl` 卡住：`ptest` 跑一下，多半是代理端（clash 没起、没开 allow-lan、主机防火墙入站被策略挡）。特征是 **SYN 无回音（`filtered`）而不是 `closed`**——`closed` 说明包已经进到 TCP 栈、只是没人监听；`filtered` 说明包根本没进去，加在本地防火墙的放行规则未必生效（域策略 `AllowInboundRules=False`、或杀软接管过滤时就是这种）。
 - 只有国内站通、google/github 干等超时：代理没在工作，本机本身没有翻墙出口，不要误判成“直连能用”。
+
+## 彻底免手动：`install-hooks.sh`
+
+自动选路只对**source 过脚本的 shell** 生效。这台机器上 `~/.zshrc` 已经有了，所以交互 zsh 终端（你日常用的那种）**开终端即带代理，不需要任何操作**。其它会话类型各有各的入口，用仓库里的 `install-hooks.sh` 一次挂全：
+
+```bash
+cd /opt/github/sh-tx-proxy
+bash install-hooks.sh            # 只挂当前用户：~/.bashrc、~/.zshrc（交互终端够用）
+sudo bash install-hooks.sh --all # 再挂系统级：/etc/profile.d、/etc/zsh/zshenv、/etc/environment
+bash install-hooks.sh --check    # 打印覆盖矩阵，不改任何文件
+sudo bash install-hooks.sh --uninstall   # 撤销它加的行（按标记删，卸载后 rc 文件逐字节还原）
+```
+
+它往每处写的都是同一句 `source .../proxy.sh`，加一行标记注释，**幂等**（重复跑显示「已挂过」），改前留 `*.bak-sh-tx-proxy` 备份。
+
+挂载点与覆盖面（实测矩阵）：
+
+| 会话类型 | 靠哪一处 | 说明 |
+| --- | --- | --- |
+| 交互 zsh（终端 tab） | `~/.zshrc` | ✅ 本来就有，装完仍是它 |
+| 交互 bash | `~/.bashrc` | Kali 的 `/etc/bash.bashrc` 第 7 行 `[ -z "$PS1" ] && return` 会挡非交互，所以只能挂用户级 |
+| 登录 shell（`bash -l`、`su -`） | `/etc/profile.d/99-sh-tx-proxy.sh` | 会被 `sh`/`dash` 读，所以 `proxy.sh` 必须保持 POSIX 兼容（已处理，见下） |
+| 非交互 zsh（`zsh -c`、zsh 脚本） | `/etc/zsh/zshenv` | zshenv 对**每一次** zsh 调用都生效 |
+| 非交互 bash（`bash -c`、agent、脚本） | `/etc/environment` 里的 `BASH_ENV` | 由 `pam_env` 应用，**新登录会话之后**才起效；实测：静默、`set -euo pipefail` 无碍、路径不存在时 bash 直接忽略、每个 `bash -c` 多 8ms |
+
+几个已知的口子（脚本装完也会提醒你这三行）：
+
+- **cron**：Debian 的 cron 默认 `SHELL=/bin/sh`（dash），**不吃 `BASH_ENV`**。要么 crontab 里写 `SHELL=/bin/bash`，要么任务里显式 `. /root/.sh-tx-proxy/proxy.sh`。cron 走 `pam_env`，所以 `/etc/environment` 里再加一份静态 `https_proxy=...` 也能覆盖。
+- **sudo**：会清掉 `BASH_ENV` 和代理变量，需要就 `Defaults env_keep += "BASH_ENV http_proxy https_proxy no_proxy"`。
+- **systemd unit**：不读上面任何一处，`artex.service` 这类服务要自己 `Environment="https_proxy=http://10.100.36.162:7890"` 或 `EnvironmentFile=`。
+
+装完之后 `bash install-hooks.sh --check` 会打出这样一张表，用来日常核对：
+
+```
+  zsh-交互       http://10.100.36.162:7890
+  zsh-非交互     http://10.100.36.162:7890
+  bash-交互      http://10.100.36.162:7890
+  bash-登录      http://10.100.36.162:7890
+  bash-非交互    http://10.100.36.162:7890
+```
 
 ## 扩展
 
