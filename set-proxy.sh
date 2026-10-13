@@ -52,7 +52,9 @@ if [ -z "${HOME:-}" ]; then
     echo "提示: HOME 未设置，按当前用户家目录 $HOME 处理" >&2
 fi
 [ -d "$HOME" ] || { echo "HOME=$HOME 不是目录，放弃。" >&2; exit 1; }
-[ -w "$HOME" ] || { echo "HOME=$HOME 不可写，放弃（要不要 sudo -H？）" >&2; exit 1; }
+if [ "$ACTION" != show ] && [ ! -w "$HOME" ]; then
+    echo "HOME=$HOME 不可写，放弃（要不要 sudo -H？）" >&2; exit 1
+fi
 
 have() { command -v "$1" >/dev/null 2>&1; }
 p()    { printf '%-22s %s\n' "$1" "$2"; }
