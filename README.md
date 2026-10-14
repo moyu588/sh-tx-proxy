@@ -3,11 +3,15 @@
 单文件、无依赖、可独立使用。**不依赖 source、不依赖 shell 函数、不依赖任何仓库**。
 配一次之后，新开的终端、脚本、工具自动带代理，不需要再敲 `p-tx` / `p-sh` 之类命令。
 
+装法用**软链**（别拷副本，否则会和仓库漂移）：
+
 ```bash
-cp set-proxy.sh /root/bin/ && chmod 755 /root/bin/set-proxy.sh
-bash /root/bin/set-proxy.sh tx            # TX 代理；默认不碰 /etc、不需要 root
-bash /root/bin/set-proxy.sh show          # 自检：每一处配置 + 端到端
+ln -sf /opt/github/sh-tx-proxy/set-proxy.sh /usr/local/bin/set-proxy.sh
+set-proxy.sh tx            # TX 代理；默认不碰 /etc、不需要 root
+set-proxy.sh show          # 自检：每一处配置 + 端到端
 ```
+
+`/usr/local/bin` 在 PATH 里，所以能直接敲 `set-proxy.sh`；软链指向仓库，以后 `git pull` 更新即生效，无第二份拷贝。
 
 ---
 
@@ -134,28 +138,35 @@ sudo 默认清空环境变量。需要就 `Defaults env_keep += "http_proxy http
 `requests` / `urllib` 只读环境变量，没有任何配置文件入口。要么 `--env`，要么在代码/命令里显式传 `proxies=`。
 
 **Q：换办公地点？**
-`bash /root/bin/set-proxy.sh sh`（或 `tx`）一条命令全机改过来；若用过 `--env`，记得带上开关（并重新登录）。
+`set-proxy.sh sh`（或 `tx`）一条命令全机改过来；若用过 `--env`，记得带上开关（并重新登录）。
 
 **Q：代理所在机器（Windows 上的 clash）睡眠/关机了？**
 配置仍指向该地址，表现是外网命令慢超时而非快速失败。`show` 的端到端自检立刻能看出来；也可让 git 快速失败：
 `git config --global http.lowSpeedLimit 1000; git config --global http.lowSpeedTime 10`。
 
-**Q：旧的 sh-tx-proxy（`proxy.sh` 的 `p-sh`/`p-tx`/`pst`）还留着？**
-不冲突也不依赖，但没必要。`bash set-proxy.sh tx --sweep` 清残留 source 行，再删仓库与 `~/.sh-tx-proxy` 软链。
+**Q：旧的 sh-tx-proxy（`proxy.sh` 的 `p-sh`/`p-tx`/`pst`）？**
+`proxy.sh` 已从仓库删除，rc 里也不再有 `source proxy.sh`（`--sweep` 清过，`show` 里「旧 proxy.sh 残留 = 无」）。
+若还想彻底收尾，只剩删一个软链：`rm -f ~/.sh-tx-proxy`。仓库本身**别删**，见下节。
 
 ---
 
 ## 七、文件清单与体量
 
 ```
-set-proxy.sh           本脚本（单文件，可拷到 /root/bin/）—— 221 行（含注释），有效代码 171 行，17 个函数
-README-set-proxy.md    本文档
+set-proxy.sh   本脚本（单文件，仓库里那份即唯一真源）—— 234 行（含注释），有效代码 183 行，18 个函数
+README.md      本文档
 ```
 
-彻底弃用旧项目（可选）：
+仓库 `/opt/github/sh-tx-proxy` 是 `set-proxy.sh` 的家，且 `/usr/local/bin/set-proxy.sh` 软链指过去。
+**所以不要 `rm -rf` 仓库**（会把脚本本体删掉、软链变断链）。日常更新走：
 
 ```bash
-bash /root/bin/set-proxy.sh show     # 确认「旧 proxy.sh 残留」为「无」
-rm -f  /root/.sh-tx-proxy            # 旧软链
-rm -rf /opt/github/sh-tx-proxy       # 旧仓库
+cd /opt/github/sh-tx-proxy && git pull          # 软链自动指向新内容，无需重装
+set-proxy.sh show                               # 拉完顺手自检一下
+```
+
+唯一还能从旧项目留下的东西是软链 `~/.sh-tx-proxy`（指向本仓库，已无人引用），要清就：
+
+```bash
+rm -f ~/.sh-tx-proxy
 ```
