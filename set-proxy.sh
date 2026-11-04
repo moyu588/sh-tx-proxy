@@ -12,7 +12,9 @@
 #   --sweep       顺带清掉 rc 里残留的 `source ~/.sh-tx-proxy/proxy.sh`
 #
 # 默认（不带开关）**完全不碰 /etc、不需要 root**。
-# 覆盖默认地址：PROXY_SH / PROXY_TX / NO_PROXY_LIST / GOPROXY_MIRROR
+# 覆盖默认地址：PROXY_SH / PROXY_TX / NO_PROXY_LIST / NO_PROXY_DIRECT_HOSTS / GOPROXY_MIRROR
+# 内网直连主机必须**逐条列 IP**（NO_PROXY_DIRECT_HOSTS）：CIDR 只有 curl/git/npm/wget 认，
+# Node（undici、dsh 的 dsh-http-proxy）不认 CIDR，会把内网请求塞进代理 —— show 里有这条自检。
 # 演练（不碰真系统）：SET_PROXY_HOME=/tmp/h SET_PROXY_ETC_DIR=/tmp/e bash set-proxy.sh tx --everything
 #
 # 写到的位置：
@@ -27,7 +29,13 @@ set -uo pipefail
 
 PROXY_SH="${PROXY_SH:-http://10.10.2.14:7890}"
 PROXY_TX="${PROXY_TX:-http://10.100.36.162:7890}"
-NO_PROXY_LIST="${NO_PROXY_LIST:-localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12}"
+# 网关机 IP：任何「本该直连、但走代理就会挂」的内网主机，逐个列在这里。
+# 为什么要单列：`10.0.0.0/8` 这种 CIDR 只有 curl / git / npm / wget 认；Node 侧（undici，
+# 以及 dsh 的 @deepseek-ai/dsh-http-proxy）只做「精确主机名或域名后缀」匹配，**不匹配 CIDR**，
+# 于是 magpie 网关 10.100.4.43:3425 的模型请求被塞进外网代理，代理回 502（空 body），
+# dsh 判为 SERVER 类错误重试 5 次后整轮失败 → GUI「模型请求失败」。
+NO_PROXY_DIRECT_HOSTS="${NO_PROXY_DIRECT_HOSTS:-10.100.4.43,10.100.1.122}"
+NO_PROXY_LIST="${NO_PROXY_LIST:-localhost,127.0.0.1,${NO_PROXY_DIRECT_HOSTS},10.0.0.0/8,192.168.0.0/16,172.16.0.0/12}"
 GOPROXY_MIRROR="${GOPROXY_MIRROR:-https://goproxy.cn,direct}"
 
 BEGIN='# ---- proxy (managed by set-proxy.sh) ----'
@@ -48,7 +56,7 @@ for a in "$@"; do
         off|unset|rm) ACTION=off ;;
         show|status)  ACTION=show ;;
         http://*|https://*) ACTION=set; URL="$a" ;;
-        -h|--help)    sed -n '2,24p' "$0"; exit 0 ;;
+        -h|--help)    awk 'NR>1 && /^#/ {print; next} NR>1 {exit}' "$0"; exit 0 ;;
         *) echo "未知参数: $a" >&2; exit 2 ;;
     esac
 done
@@ -202,7 +210,35 @@ show_all() {
     fi
     local gr; gr="$(timeout 20 git ls-remote https://github.com/moyu588/sh-tx-proxy.git HEAD 2>&1 | cut -c1-40)"
     printf '  %-22s %s\n' "git ls-remote"      "${gr:-失败/超时（无代理时属正常）}"
-    printf '  %-22s %s\n' "内网(应直连)"      "$(curl -sS -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' http://10.100.4.43:3425/v1/models 2>&1 | tail -1)"
+    printf '  %-22s %s\n' "内网(应直连/curl)"  "$(curl -sS -o /dev/null --connect-timeout 4 --max-time 8 -w '%{http_code}' http://10.100.4.43:3425/v1/models 2>&1 | tail -1)"
+    # Node（undici / dsh-http-proxy）**不认 CIDR**：上面 curl 显示直连正常，不代表 dsh 的模型请求没被塞进代理。
+    # 这里读「这个 home 真正会吃到的」那行 no_proxy，按 Node 的匹配语义（精确主机名，CIDR 不算）复核直连主机。
+    local npl="" f
+    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zshenv" "$HOME/.profile"; do
+        [ -f "$f" ] || continue
+        npl="$(awk -v b="$BEGIN" -v e="$END" 'index($0,b){g=1;next} index($0,e){g=0;next} g && /^export no_proxy=/{sub(/^export no_proxy=/,""); gsub(/"/,""); print; exit}' "$f")"
+        [ -n "$npl" ] && break
+    done
+    [ -n "$npl" ] || npl="${no_proxy:-${NO_PROXY:-}}"
+    local eff="${http_proxy:-${HTTP_PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}}"
+    [ -n "$eff" ] || eff="$(grep -m1 -h '^proxy' "$HOME/.curlrc" 2>/dev/null | sed 's/^proxy[[:space:]]*=[[:space:]]*//; s/"//g')"
+    local missing='' h entry host hit
+    for h in ${NO_PROXY_DIRECT_HOSTS//,/ }; do
+        hit=0
+        for entry in ${npl//,/ }; do
+            host="${entry%%:*}"; host="${host#\*.}"; host="${host#.}"
+            [ "$host" = '*' ] && { hit=1; break; }
+            case "$host" in */*|'') : ;; *) [ "$h" = "$host" ] && { hit=1; break; } ;; esac
+        done
+        [ "$hit" = 1 ] || missing="$missing $h"
+    done
+    if [ -z "$eff" ]; then
+        printf '  %-22s %s\n' "内网(应直连/Node)" '未配代理，跳过'
+    elif [ -n "$missing" ]; then
+        printf '  %-22s %s\n' "内网(应直连/Node)" "会被塞进代理:$missing（Node 不认 CIDR，直连 IP 要逐条写）"
+    else
+        printf '  %-22s %s\n' "内网(应直连/Node)" "OK：${NO_PROXY_DIRECT_HOSTS} 已逐条旁路"
+    fi
 }
 
 # ---- 主流程 ------------------------------------------------------------------

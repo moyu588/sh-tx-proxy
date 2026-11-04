@@ -59,7 +59,17 @@ set-proxy.sh show    # 自检
 | `--everything` | = `--env` + `--go` | |
 | `--sweep` | 清掉 rc 里残留的 `source .../proxy.sh` 行 | 仅从旧版 `proxy.sh` 迁移的机器需要 |
 
-`no_proxy` 全处统一为 `localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12`。
+`no_proxy` 全处统一为 `localhost,127.0.0.1,10.100.4.43,10.100.1.122,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12`：前 4 项是逐条列出的**必须直连主机**，后 3 项是 CIDR 段。
+
+### 内网主机为什么要逐条列 IP：Node 不认 CIDR
+
+`10.0.0.0/8` 这种 CIDR 写法只有 **curl / wget / git / npm** 认；**Node 侧不认**。undici 的 `EnvHttpProxyAgent`、以及 `dsh` 自带的 `@deepseek-ai/dsh-http-proxy`，都只做「精确主机名 / 域名后缀」匹配 —— 源码原话：*"CIDR notation is not matched — an operating system's bypass list often carries `10.0.0.0/8`, which must be rewritten as suffixes"*。域名还能靠后缀（列 `example.com` 顺带旁路 `api.example.com`），**IP 段没有等价写法，只能一台一条列出来**。`python requests`/`urllib` 同样不认 CIDR。
+
+踩过的坑（2026-11-04 实测，本机）：给 `sagent` 配了 `set-proxy.sh sh` 之后，跑在 3082 端口的 `dsh` 模型请求全挂 —— 网关是内网 `http://10.100.4.43:3425`，而 `no_proxy` 里只有 CIDR，Node 判定「不在旁路表内」→ 请求被塞进外网代理 `10.10.2.14:7890` → 代理到不了那台机器 → **`502 status code (no body)`**；`dsh` 按 SERVER 类错误退避重试 5 次后整轮失败，GUI 显示「模型请求失败」。同一请求**直连则 200**。
+
+- **curl 自检看不出这个故障**：curl 认 CIDR，`内网(应直连)` 一路显示正常，Node 却在全程走代理。所以 `show` 多加了一行 `内网(应直连/Node)`，按 Node 的匹配语义复核（curl 绿 / Node 红 = 缺逐条 IP）。
+- 要直连的内网主机写在脚本头部 `NO_PROXY_DIRECT_HOSTS`（默认 `10.100.4.43,10.100.1.122`），也可用同名环境变量临时覆盖；改完重跑一次 `set-proxy.sh sh|tx`。
+- rc 只对**新会话**生效：已在跑的服务要重启才吃到。若服务起在 tmux 里，pane 继承的是 **tmux server 的环境**，得先 `tmux set-environment -g no_proxy "<新值>"`（`NO_PROXY` 同理）再重启服务，否则改了 rc 也照样复发。
 
 ---
 
@@ -74,7 +84,7 @@ set-proxy.sh off                 # 撤销（须带上当初用过的同样开关
 set-proxy.sh tx --everything     # 再加 /etc/environment 与 GOPROXY（需 root）
 ```
 
-- 改默认值：环境变量 `PROXY_SH` / `PROXY_TX` / `NO_PROXY_LIST` / `GOPROXY_MIRROR`。
+- 改默认值：环境变量 `PROXY_SH` / `PROXY_TX` / `NO_PROXY_LIST` / `NO_PROXY_DIRECT_HOSTS`（必须逐条直连的内网主机，见第二节）/ `GOPROXY_MIRROR`。
 - 演练（不碰真系统）：`SET_PROXY_HOME=/tmp/h SET_PROXY_ETC_DIR=/tmp/e set-proxy.sh tx --everything`
 - **撤销要带同样的开关**：`--env`/`--go` 写出去的，`off` 时也要带对应开关才会被清掉，避免误删你本没让脚本碰的东西。
 
@@ -99,7 +109,9 @@ set-proxy.sh tx --everything     # 再加 /etc/environment 与 GOPROXY（需 roo
 set-proxy.sh show
 ```
 
-输出两部分：**每一处当前配置**（rc 四文件有无块及取值、git/npm/curl/wget/pip、GOPROXY、`/etc/environment`、当前会话 env、旧 `proxy.sh` 残留）与**端到端自检**（curl、python requests、git ls-remote、内网直连）。`python` 那行只在 `--env` 存在时注入变量实测，否则说明"它只认环境变量，故跳过"。
+输出两部分：**每一处当前配置**（rc 四文件有无块及取值、git/npm/curl/wget/pip、GOPROXY、`/etc/environment`、当前会话 env、旧 `proxy.sh` 残留）与**端到端自检**（curl、python requests、git ls-remote、内网直连 curl 与 Node 两条）。`python` 那行只在 `--env` 存在时注入变量实测，否则说明"它只认环境变量，故跳过"。
+
+`内网(应直连/Node)` 那行按 Node 的匹配语义（精确主机名，CIDR 不算）复核 `NO_PROXY_DIRECT_HOSTS` 里每台机器是否真被旁路：curl 直连正常而它报警，就是 Node 侧仍会走代理（见第二节的 502 事故）。
 
 ---
 
@@ -114,6 +126,8 @@ set-proxy.sh show
 **`sudo` 之后没了？** sudo 默认清空环境变量。需要就 `Defaults env_keep += "http_proxy https_proxy no_proxy"`；但 git/npm/curl 读各自配置文件，多数不受影响。
 
 **python 为什么必须 `--env`？** `requests`/`urllib` 只读环境变量，无配置文件入口 → `--env` 或代码里显式传 `proxies=`。
+
+**Node/dsh 报 `502 (no body)`，curl 却一切正常？** Node 不认 `no_proxy` 里的 CIDR，内网直连主机被塞进了代理 → 把它的 IP 逐条加进 `NO_PROXY_DIRECT_HOSTS` 重跑一次，再重启服务（起在 tmux 里的要先 `tmux set-environment -g no_proxy/NO_PROXY`）。详见第二节。
 
 **换办公地点？** `set-proxy.sh sh`（或 `tx`）一条命令全机改；用过 `--env` 就带上开关并重新登录。
 
